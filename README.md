@@ -1,0 +1,103 @@
+# Mango 🥭
+
+A menu bar app for brightness, volume, and audio routing across a MacBook's
+built-in display and an external DDC-capable monitor.
+
+Written because BenQ's Display Pilot 2 drives the monitor over the same public
+DDC/CI protocol, but wraps it in a slow Qt/WebEngine UI and ignores the laptop
+panel entirely.
+
+## Features
+
+- **Two brightness sliders** — the external monitor and the built-in panel,
+  controlled independently.
+- **Function keys** — `F1`/`F2` drive the monitor, `⌥F1`/`⌥F2` the built-in
+  panel. With no monitor attached, both drive the built-in panel.
+- **Volume** for whichever output is active, including monitors whose volume
+  lives in hardware rather than in CoreAudio.
+- **Audio output and input switching** from the same panel.
+- A compact HUD under the menu bar, replacing the macOS one.
+
+## Install
+
+Download the latest `Mango-*.dmg` from
+[Releases](../../releases), then:
+
+1. Drag **Mango.app** to **Applications**.
+2. **Right-click → Open** the first time. This build is signed but not
+   notarised, so Gatekeeper asks once.
+3. Grant Accessibility permission when prompted — this is what lets the
+   brightness and volume keys work:
+   **System Settings → Privacy & Security → Accessibility → enable Mango**
+
+Mango lives in the menu bar, not the Dock, and can open at login.
+
+## Build from source
+
+Requires Xcode command line tools. No Xcode project, no dependencies.
+
+    ./build.sh --install     # build, sign, install to /Applications
+    ./package.sh 1.0         # build Mango-1.0.dmg
+
+`build.sh` signs with an Apple Development certificate if one is present.
+That matters: an ad-hoc signature (`--sign -`) produces a different code hash
+on every build, which silently invalidates the Accessibility grant — System
+Settings keeps showing the app as enabled while macOS stops honouring it.
+
+## How it works
+
+| Control | Built-in display | External monitor |
+| --- | --- | --- |
+| Brightness | `DisplayServices` | DDC/CI VCP `0x10` |
+| Volume | CoreAudio | CoreAudio, or DDC VCP `0x62` |
+
+DDC/CI is spoken directly over I2C through `IOAVService`, the same public path
+any DDC utility uses. The bus is slow — roughly 100 ms per read and 75 ms per
+write — so all traffic runs on a background queue with cached values, and
+writes coalesce to the newest pending value. Dragging a slider tracks the
+finger rather than replaying a backlog.
+
+Volume takes one of two paths depending on the active output device. Most
+devices expose a CoreAudio volume; DisplayPort and HDMI monitors do not,
+because their volume lives in the monitor's own hardware and is reachable only
+over DDC.
+
+## Command line
+
+`mon` is a small CLI sharing the same DDC engine:
+
+    mon                  # status for both displays
+    mon b|eb <0-100>     # built-in / external brightness
+    mon v <0-100>        # external volume
+    mon dim | bright     # both displays at once
+
+Build it with:
+
+    swiftc -O -o mon src/DDC.swift src/Builtin.swift src/main.swift
+
+## Monitor compatibility
+
+Developed against a **BenQ EW2790U** over USB-C. Any monitor that answers
+DDC/CI should work for brightness, contrast, and volume, though vendor
+specifics vary.
+
+Two findings specific to this panel, likely shared by other BenQ models:
+
+- **Picture mode locks brightness.** VCP `0xDC` selects the picture mode.
+  In HDR and cinema modes the firmware drives the backlight itself:
+  brightness writes are accepted and read back correctly, but the panel
+  ignores them, so brightness appears to flash and snap back. Mango detects
+  this and offers to switch the monitor to Standard.
+- **Colour modes are read-only.** The monitor advertises presets on VCP
+  `0x14` but silently ignores writes. Display Pilot 2 cannot change them over
+  DDC either. Use the monitor's OSD joystick.
+
+## Requirements
+
+- Apple Silicon Mac (the DDC path uses `IOAVService`)
+- macOS 14 or later
+- A monitor connected by USB-C, DisplayPort, or HDMI
+
+## Licence
+
+MIT

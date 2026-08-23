@@ -1,0 +1,10 @@
+# Build output
+Mango.app/
+mon
+
+# macOS
+.DS_Store
+
+
+# Release artifacts (published to GitHub Releases, not committed)
+*.dmg
