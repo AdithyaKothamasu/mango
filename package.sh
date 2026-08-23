@@ -11,7 +11,8 @@ VERSION="${1:-1.0}"
 STAGE="$(mktemp -d)"
 DMG="Mango-$VERSION.dmg"
 
-./build.sh
+# Build only; do not touch the installed copy or the running app.
+./build.sh --no-install
 
 # ditto preserves the code signature; cp -R can break the seal.
 ditto Mango.app "$STAGE/Mango.app"

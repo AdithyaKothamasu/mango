@@ -58,7 +58,7 @@ fi
 
 # Install to a stable location; TCC ties the grant to the app's path as well
 # as its signature.
-if [ -d "/Applications/Mango.app" ] || [ "$1" = "--install" ]; then
+if [ "$1" != "--no-install" ] && { [ -d "/Applications/Mango.app" ] || [ "$1" = "--install" ]; }; then
   pkill -f "Mango.app" 2>/dev/null || true
   sleep 1
   rm -rf /Applications/Mango.app
