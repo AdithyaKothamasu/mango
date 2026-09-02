@@ -23,6 +23,20 @@ final class VolumeController: ObservableObject {
         Audio.observeDefaultChanges { [weak self] in
             Task { @MainActor in self?.reload() }
         }
+
+        // Volume on a DisplayPort monitor rides the same DDC link as
+        // brightness, so it needs re-reading after a wake too.
+        for name in [NSWorkspace.didWakeNotification,
+                     NSWorkspace.screensDidWakeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            self?.reload()
+                        }
+                    }
+                }
+        }
     }
 
     /// True when audio is riding the monitor's DisplayPort link.

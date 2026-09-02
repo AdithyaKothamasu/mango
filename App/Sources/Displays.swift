@@ -34,6 +34,17 @@ final class Displays: ObservableObject {
             object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.screensChanged() }
             }
+
+        // Waking from sleep tears down and rebuilds the display's AV service,
+        // leaving the cached handle pointing at a service that silently
+        // swallows writes. Rebind as soon as the machine or the screen wakes.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification,
+                     NSWorkspace.screensDidWakeNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.displayLinkRestored() }
+            }
+        }
     }
 
     private static func externalScreenName() -> String? {
@@ -53,11 +64,22 @@ final class Displays: ObservableObject {
         }
     }
 
+    /// Rebinds the DDC connection and re-reads the monitor after a wake or
+    /// reconnect. A short delay lets the link finish coming up first.
+    private func displayLinkRestored() {
+        external?.invalidate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.screensChanged()
+        }
+    }
+
     private func screensChanged() {
         externalAvailable = external != nil && externalScreenAttached
         if let name = Self.externalScreenName() { externalName = name }
         guard externalAvailable else { refresh(); return }
-        external?.refresh([.luminance, .pictureMode]) { [weak self] in self?.refresh() }
+        external?.refresh([.luminance, .pictureMode, .volume, .mute]) { [weak self] in
+            self?.refresh()
+        }
     }
 
     /// Reads from cache only — safe to call on every UI event.

@@ -42,7 +42,11 @@ enum VCP: UInt8 {
 /// Values are cached and written through, letting the UI stay at display rate
 /// while the monitor catches up.
 final class ExternalDisplay: @unchecked Sendable {
-    private let service: IOAVServiceRef
+    /// Replaced whenever the display reconnects: sleep, unplug, or a mode
+    /// change tears the old service down and the OS builds a new one. A stale
+    /// handle still returns KERN_SUCCESS while doing nothing, so failures are
+    /// silent and must be detected by reads coming back malformed.
+    private var service: IOAVServiceRef
     private let chip: UInt32 = 0x37
     private let addr: UInt32 = 0x51
 
@@ -56,7 +60,8 @@ final class ExternalDisplay: @unchecked Sendable {
     private var pending: [VCP: UInt16] = [:]
     private let pendingLock = NSLock()
 
-    init?() {
+    /// Finds the external display's AV service, or nil if none is attached.
+    private static func acquireService() -> IOAVServiceRef? {
         guard let avCreate else { return nil }
         var iter = io_iterator_t()
         guard IOServiceGetMatchingServices(kIOMainPortDefault,
@@ -75,8 +80,30 @@ final class ExternalDisplay: @unchecked Sendable {
             IOObjectRelease(svc)
             svc = IOIteratorNext(iter)
         }
-        guard let f = found else { return nil }
+        return found
+    }
+
+    init?() {
+        guard let f = Self.acquireService() else { return nil }
         service = f
+    }
+
+    /// Rebinds to the current AV service. Called from the bus queue only.
+    /// Returns false when no external display is attached.
+    @discardableResult
+    private func reconnect() -> Bool {
+        guard let fresh = Self.acquireService() else { return false }
+        service = fresh
+        return true
+    }
+
+    /// Drops cached values so the next refresh re-reads real hardware state.
+    func invalidate() {
+        bus.async { [weak self] in
+            guard let self else { return }
+            _ = self.reconnect()
+            self.cacheLock.lock(); self.cache.removeAll(); self.cacheLock.unlock()
+        }
     }
 
     // MARK: Cache
@@ -99,6 +126,14 @@ final class ExternalDisplay: @unchecked Sendable {
     // MARK: Blocking primitives (bus queue only)
 
     private func readSync(_ code: VCP) -> (current: UInt16, max: UInt16)? {
+        if let value = readOnce(code) { return value }
+        // Every attempt failed: after a display sleep or reconnect the handle
+        // points at a service that no longer exists. Rebind and try again.
+        guard reconnect() else { return nil }
+        return readOnce(code)
+    }
+
+    private func readOnce(_ code: VCP) -> (current: UInt16, max: UInt16)? {
         guard let avWrite, let avRead else { return nil }
         for attempt in 0..<3 {
             var packet = [UInt8](repeating: 0, count: 12)
@@ -124,6 +159,17 @@ final class ExternalDisplay: @unchecked Sendable {
     }
 
     private func writeSync(_ code: VCP, _ value: UInt16) {
+        writeOnce(code, value)
+
+        // A stale handle reports success while doing nothing, so a dead service
+        // is only detectable by reads failing. Probe, and on failure rebind and
+        // resend — otherwise the slider moves while the monitor ignores it,
+        // which is exactly what happens after the display sleeps.
+        guard readOnce(code) == nil else { return }
+        if reconnect() { writeOnce(code, value) }
+    }
+
+    private func writeOnce(_ code: VCP, _ value: UInt16) {
         guard let avWrite else { return }
         var packet = [UInt8](repeating: 0, count: 12)
         packet[0] = 0x84
