@@ -20,17 +20,23 @@ panel entirely.
 
 ## Install
 
-Download the latest `Mango-*.dmg` from
-[Releases](../../releases), then:
+Requires an **Apple Silicon Mac** (M1 or later) on macOS 14+. Intel Macs are not
+supported — the display control path does not exist there.
+
+Download the latest `Mango-*.dmg` from [Releases](../../releases), then:
 
 1. Drag **Mango.app** to **Applications**.
-2. **Right-click → Open** the first time. This build is signed but not
-   notarised, so Gatekeeper asks once.
+2. Open it. macOS refuses the first time and may warn about malware. The build
+   is not notarised, which is the whole reason: macOS cannot verify an app it
+   has not seen before. To allow it, go to **System Settings → Privacy &
+   Security**, scroll to **Security**, and click **Open Anyway** next to the
+   message about Mango.
 3. Grant Accessibility permission when prompted — this is what lets the
    brightness and volume keys work:
    **System Settings → Privacy & Security → Accessibility → enable Mango**
 
-Mango lives in the menu bar, not the Dock, and can open at login.
+Mango lives in the menu bar, not the Dock. Look for the mango icon at the top
+right; there is no window and no Dock icon.
 
 ## Build from source
 
@@ -39,10 +45,18 @@ Requires Xcode command line tools. No Xcode project, no dependencies.
     ./build.sh --install     # build, sign, install to /Applications
     ./package.sh 1.0         # build Mango-1.0.dmg
 
-`build.sh` signs with an Apple Development certificate if one is present.
-That matters: an ad-hoc signature (`--sign -`) produces a different code hash
-on every build, which silently invalidates the Accessibility grant — System
-Settings keeps showing the app as enabled while macOS stops honouring it.
+`build.sh` signs with an Apple Development certificate for local use, so the
+code hash stays identical across rebuilds and macOS keeps honouring the
+Accessibility grant. An ad-hoc signature changes hash every build and silently
+invalidates it — System Settings keeps showing the app enabled while the keys
+stop working.
+
+`--dist` (which `package.sh` passes) signs ad-hoc instead. That is deliberate:
+a Development certificate carries a team identity that only validates on Macs
+provisioned for that developer account, so a Development-signed build is killed
+at launch on anyone else's machine — it appears to open, then vanishes with no
+menu bar icon. Ad-hoc has no identity to validate and runs anywhere once the
+user approves it.
 
 ## How it works
 
