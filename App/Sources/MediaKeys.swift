@@ -42,6 +42,12 @@ final class MediaKeys {
     /// touching main-actor state. Written once, before the tap is enabled.
     private nonisolated(unsafe) var tapPort: CFMachPort?
 
+    /// Which key groups to intercept. Read on the tap thread, so they bypass
+    /// the actor; a Bool flip racing one key press is harmless. A disabled
+    /// group passes straight through to macOS.
+    nonisolated(unsafe) var handlesBrightness = true
+    nonisolated(unsafe) var handlesVolume = true
+
     /// Set when the tap is live; false means Accessibility permission is missing.
     private(set) var isActive = false
 
@@ -119,11 +125,11 @@ final class MediaKeys {
 
     private nonisolated func mapping(for code: Int32) -> Key? {
         switch code {
-        case Code.soundUp:        return .volumeUp
-        case Code.soundDown:      return .volumeDown
-        case Code.mute:           return .mute
-        case Code.brightnessUp:   return .brightnessUp
-        case Code.brightnessDown: return .brightnessDown
+        case Code.soundUp:        return handlesVolume ? .volumeUp : nil
+        case Code.soundDown:      return handlesVolume ? .volumeDown : nil
+        case Code.mute:           return handlesVolume ? .mute : nil
+        case Code.brightnessUp:   return handlesBrightness ? .brightnessUp : nil
+        case Code.brightnessDown: return handlesBrightness ? .brightnessDown : nil
         default:                  return nil
         }
     }

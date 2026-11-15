@@ -15,6 +15,12 @@ panel entirely.
   panel. With no monitor attached, both drive the built-in panel.
 - **Volume** for whichever output is active, including monitors whose volume
   lives in hardware rather than in CoreAudio.
+- **Trackpad volume** — rest one finger on the right edge of the trackpad and
+  slide up or down to change the volume of whatever is playing: speakers,
+  Bluetooth headphones, or the monitor. The cursor stays put while you do it.
+- **Feature switches** — *Monitor control* (brightness sliders and `F1`/`F2`)
+  and *Volume control* (trackpad edge, volume slider, volume keys) can each be
+  turned off from the panel; a disabled feature hands its keys back to macOS.
 - **Audio output and input switching** from the same panel.
 - A compact HUD under the menu bar, replacing the macOS one.
 

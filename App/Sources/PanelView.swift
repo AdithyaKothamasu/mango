@@ -3,6 +3,8 @@ import SwiftUI
 struct PanelView: View {
     @ObservedObject var displays: Displays
     @ObservedObject var volume: VolumeController
+    @ObservedObject var features: Features
+    let trackpadAvailable: Bool
     let mediaKeysActive: Bool
     let onRequestAccessibility: () -> Void
     let onUnlockBrightness: () -> Void
@@ -18,11 +20,12 @@ struct PanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            brightnessCard
-            volumeCard
+            featuresCard
+            if features.monitorControl { brightnessCard }
+            if features.volumeControl { volumeCard }
             devicesCard
 
-            if !mediaKeysActive {
+            if !mediaKeysActive, features.monitorControl || features.volumeControl {
                 Button(action: onRequestAccessibility) {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -46,6 +49,50 @@ struct PanelView: View {
         .onAppear {
             reloadDevices()
             launchAtLogin = LoginItem.isEnabled
+        }
+    }
+
+    // MARK: Features
+
+    private var featuresCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 9) {
+                featureToggle(icon: "sun.max.fill", tint: amber,
+                              title: "Monitor control", detail: "Brightness · F1/F2",
+                              isOn: $features.monitorControl)
+                Divider().overlay(Color.glassStroke)
+                featureToggle(icon: "speaker.wave.2.fill", tint: .glassTint,
+                              title: "Volume control",
+                              detail: trackpadAvailable
+                                ? "Trackpad right edge · slider · keys"
+                                : "Slider · keys (trackpad unavailable)",
+                              isOn: $features.volumeControl)
+            }
+        }
+    }
+
+    private func featureToggle(icon: String, tint: Color, title: String,
+                               detail: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isOn.wrappedValue ? tint : Color.glassSecondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.glassText)
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.glassSecondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Color.glassTint)
         }
     }
 
@@ -189,9 +236,7 @@ struct PanelView: View {
             }
 
             HStack {
-                Text(displays.externalAvailable
-                     ? "F1/F2 monitor · ⌥ built-in"
-                     : "No monitor · F1/F2 built-in")
+                Text(hint)
                     .font(.system(size: 10))
                     .foregroundStyle(Color.glassSecondary)
                 Spacer()
@@ -201,6 +246,18 @@ struct PanelView: View {
                     .foregroundStyle(Color.glassSecondary)
             }
         }
+    }
+
+    private var hint: String {
+        if features.monitorControl {
+            return displays.externalAvailable
+                ? "F1/F2 monitor · ⌥ built-in"
+                : "No monitor · F1/F2 built-in"
+        }
+        if features.volumeControl, trackpadAvailable {
+            return "Swipe the trackpad's right edge"
+        }
+        return ""
     }
 
     private func rowLabel(_ title: String, detail: String,
