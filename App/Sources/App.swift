@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let displays = Displays()
     private lazy var volume = VolumeController(external: displays.external)
     private var mediaKeys: MediaKeys!
+    private let features = Features()
+    private lazy var trackpad = TrackpadVolume(volume: volume)
     private var trustPoll: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -42,8 +44,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         mediaKeys.start()
 
+        features.onChange = { [weak self] in self?.applyFeatures() }
+        applyFeatures()
+
         enableLoginItemOnFirstRun()
         rebuildPanel()
+    }
+
+    /// Arms or disarms each feature's inputs to match the panel switches.
+    private func applyFeatures() {
+        mediaKeys.handlesBrightness = features.monitorControl
+        mediaKeys.handlesVolume = features.volumeControl
+        trackpad.setEnabled(features.volumeControl)
     }
 
     /// Registers for launch-at-login the first time the app runs, so it is
@@ -72,13 +84,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let view = PanelView(
             displays: displays,
             volume: volume,
+            features: features,
+            trackpadAvailable: trackpad.isAvailable,
             mediaKeysActive: mediaKeys.isActive,
             onRequestAccessibility: { [weak self] in self?.promptForAccessibility() },
             onUnlockBrightness: { [weak self] in
                 self?.displays.unlockBrightness { [weak self] in self?.rebuildPanel() }
             }
         )
-        popover.contentViewController = NSHostingController(rootView: view)
+        let host = NSHostingController(rootView: view)
+        // Let the popover follow the content as feature cards come and go.
+        host.sizingOptions = .preferredContentSize
+        popover.contentViewController = host
     }
 
     @objc private func togglePanel() {
@@ -154,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 timer.invalidate()
                 self.trustPoll = nil
                 self.mediaKeys.start()
+                self.applyFeatures()
                 self.rebuildPanel()
             }
         }
