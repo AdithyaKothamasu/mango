@@ -4,9 +4,15 @@ import CoreGraphics
 
 /// One-finger volume control along the right edge of the trackpad.
 ///
-/// A single finger that lands in the right-hand strip and then moves mostly
-/// vertically becomes a volume gesture: up is louder, down is quieter. The
-/// cursor is frozen for the duration so the swipe does not also drag it.
+/// A single finger that lands in the right-hand strip and rests there briefly
+/// becomes a volume gesture: a haptic tick confirms it, then sliding up is
+/// louder and down is quieter. The cursor is frozen for the duration so the
+/// swipe does not also drag it.
+///
+/// The hold is what separates it from ordinary pointing. A cursor move that
+/// starts at the edge lands and moves almost at once; resting still first is
+/// deliberate. Any movement before the hold completes hands the touch back as
+/// a normal cursor move.
 ///
 /// One-finger movement never produces scroll events — macOS turns it straight
 /// into cursor motion — so the raw contact positions come from the private
@@ -16,12 +22,13 @@ import CoreGraphics
 /// launching.
 @MainActor
 final class TrackpadVolume {
-    /// Right-hand strip, as a fraction of the trackpad width, where a touch arms.
-    private static let edge: Float = 0.88
-    /// Vertical travel (fraction of trackpad height) before a touch commits.
-    private static let engageTravel: Float = 0.025
-    /// Sideways travel that marks the touch as ordinary cursor movement.
-    private static let rejectTravel: Float = 0.06
+    /// Right-hand strip, as a fraction of the trackpad width, where a touch can arm.
+    private static let edge: Float = 0.92
+    /// How long the finger has to rest before the swipe arms.
+    private static let hold: TimeInterval = 0.35
+    /// Movement (normalised trackpad units) allowed during the hold. Covers
+    /// the tremor of a resting finger; anything more is a cursor move.
+    private static let stillness: Float = 0.02
     /// Volume change per unit of trackpad height: ~80% of the pad is full range.
     private static let sensitivity: Double = 1.25
     /// Smallest change worth sending to the device (DDC writes are not free).
@@ -33,15 +40,19 @@ final class TrackpadVolume {
 
     private enum Phase {
         case idle
-        /// Landed in the edge strip; waiting to see which way it moves.
-        case armed(id: Int32, startX: Float, startY: Float, cursor: CGPoint)
+        /// Resting in the edge strip; arms if it stays still for `hold`.
+        case holding(id: Int32, device: UInt, startX: Float, startY: Float, lastY: Float,
+                     cursor: CGPoint)
         /// Committed to a volume gesture.
         case engaged(id: Int32, lastY: Float, cursor: CGPoint, pending: Double)
         /// Not ours (started elsewhere, moved sideways, or extra fingers);
         /// ignored until every finger lifts.
         case rejected
     }
-    private var phase = Phase.idle
+    private var phase = Phase.idle {
+        didSet { if case .holding = phase {} else { holdTimer?.cancel(); holdTimer = nil } }
+    }
+    private var holdTimer: DispatchWorkItem?
 
     init(volume: VolumeController) {
         self.volume = volume
@@ -104,24 +115,23 @@ final class TrackpadVolume {
 
         switch phase {
         case .idle:
-            if touch.x >= Self.edge {
-                phase = .armed(id: touch.id, startX: touch.x, startY: touch.y,
-                               cursor: Self.cursorLocation())
-            } else {
-                phase = .rejected
-            }
+            guard touch.x >= Self.edge else { phase = .rejected; return }
+            phase = .holding(id: touch.id, device: touch.device, startX: touch.x,
+                             startY: touch.y, lastY: touch.y, cursor: Self.cursorLocation())
+            // A timer rather than frame timestamps: a perfectly still finger
+            // is not guaranteed to keep producing frames.
+            let timer = DispatchWorkItem { [weak self] in self?.holdElapsed() }
+            holdTimer = timer
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.hold, execute: timer)
 
-        case let .armed(id, startX, startY, cursor):
+        case let .holding(id, device, startX, startY, _, cursor):
             guard touch.id == id else { phase = .rejected; return }
             let dx = touch.x - startX, dy = touch.y - startY
-            if abs(dx) > Self.rejectTravel {
-                phase = .rejected
-            } else if abs(dy) > Self.engageTravel, abs(dy) > abs(dx) * 1.5 {
-                freezeCursor(at: cursor)
-                volume.refresh() // pick up changes made elsewhere since last time
-                phase = .engaged(id: id, lastY: touch.y, cursor: cursor,
-                                 pending: Double(dy) * Self.sensitivity)
-                flush()
+            if dx * dx + dy * dy > Self.stillness * Self.stillness {
+                phase = .rejected // moved before arming: ordinary pointing
+            } else {
+                phase = .holding(id: id, device: device, startX: startX, startY: startY,
+                                 lastY: touch.y, cursor: cursor)
             }
 
         case let .engaged(id, lastY, cursor, pending):
@@ -133,6 +143,15 @@ final class TrackpadVolume {
         case .rejected:
             break
         }
+    }
+
+    /// The finger rested long enough: arm the swipe.
+    private func holdElapsed() {
+        guard case let .holding(id, device, _, _, lastY, cursor) = phase else { return }
+        freezeCursor(at: cursor)
+        volume.refresh() // pick up changes made elsewhere since last time
+        multitouch?.click(device: device)
+        phase = .engaged(id: id, lastY: lastY, cursor: cursor, pending: 0)
     }
 
     /// Sends the accumulated change once it is big enough to matter.
@@ -180,6 +199,8 @@ final class TrackpadVolume {
 /// Thin, dynamically loaded wrapper over the private MultitouchSupport API.
 private final class Multitouch {
     struct Contact: Sendable {
+        /// The surface it came from, so feedback goes to the pad being touched.
+        let device: UInt
         let id: Int32
         let state: Int32
         /// Normalised 0...1, origin at the bottom-left of the pad.
@@ -218,6 +239,27 @@ private final class Multitouch {
     private typealias Register = @convention(c) (UnsafeMutableRawPointer?, Callback?) -> Void
     private typealias Start = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void
     private typealias Stop = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    private typealias GetDeviceID = @convention(c) (UnsafeMutableRawPointer?,
+                                                    UnsafeMutablePointer<UInt64>) -> Int32
+    private typealias CreateActuator = @convention(c) (UInt64) -> Unmanaged<CFTypeRef>?
+    private typealias ActuatorCall = @convention(c) (CFTypeRef) -> Int32
+    private typealias Actuate = @convention(c) (CFTypeRef, Int32, UInt32, Float, Float) -> Int32
+
+    /// The trackpad's haptic engine, driven directly.
+    ///
+    /// `NSHapticFeedbackManager` only reaches the trackpad while this app is
+    /// frontmost, which a menu bar app almost never is, and its patterns are
+    /// faint. The actuator API works from the background and has firmer
+    /// clicks. Missing symbols just mean no click; the gesture still works.
+    private struct Haptics {
+        let getDeviceID: GetDeviceID
+        let create: CreateActuator
+        let open: ActuatorCall
+        let close: ActuatorCall
+        let actuate: Actuate
+    }
+    private var haptics: Haptics?
+    private var actuators: [UInt: CFTypeRef] = [:]
 
     /// Receives each frame's contacts on the framework's own thread. The C
     /// callback carries no context pointer, so this has to be global.
@@ -250,22 +292,35 @@ private final class Multitouch {
               let start = dlsym(handle, "MTDeviceStart"),
               let stop = dlsym(handle, "MTDeviceStop")
         else { return nil }
-        return Multitouch(
+        let multitouch = Multitouch(
             createList: unsafeBitCast(createList, to: CreateList.self),
             register: unsafeBitCast(register, to: Register.self),
             unregister: unsafeBitCast(unregister, to: Register.self),
             start: unsafeBitCast(start, to: Start.self),
             stop: unsafeBitCast(stop, to: Stop.self))
+        if let getID = dlsym(handle, "MTDeviceGetDeviceID"),
+           let create = dlsym(handle, "MTActuatorCreateFromDeviceID"),
+           let open = dlsym(handle, "MTActuatorOpen"),
+           let close = dlsym(handle, "MTActuatorClose"),
+           let actuate = dlsym(handle, "MTActuatorActuate") {
+            multitouch.haptics = Haptics(
+                getDeviceID: unsafeBitCast(getID, to: GetDeviceID.self),
+                create: unsafeBitCast(create, to: CreateActuator.self),
+                open: unsafeBitCast(open, to: ActuatorCall.self),
+                close: unsafeBitCast(close, to: ActuatorCall.self),
+                actuate: unsafeBitCast(actuate, to: Actuate.self))
+        }
+        return multitouch
     }
 
-    private static let callback: Callback = { _, touches, count, _, _ in
+    private static let callback: Callback = { device, touches, count, _, _ in
         guard let sink = Multitouch.sink else { return 0 }
         var contacts: [Contact] = []
         if let touches, count > 0 {
             let buffer = UnsafeBufferPointer(
                 start: touches.assumingMemoryBound(to: Touch.self), count: Int(count))
             contacts = buffer.map {
-                Contact(id: $0.identifier, state: $0.state,
+                Contact(device: UInt(bitPattern: device), id: $0.identifier, state: $0.state,
                         x: $0.normalized.position.x, y: $0.normalized.position.y)
             }
         }
@@ -288,10 +343,31 @@ private final class Multitouch {
         eachDevice { device in
             register(device, Self.callback)
             startDevice(device, 0)
+            openActuator(for: device)
         }
     }
 
+    private func openActuator(for device: UnsafeMutableRawPointer) {
+        guard let haptics else { return }
+        var id: UInt64 = 0
+        guard haptics.getDeviceID(device, &id) == 0,
+              let actuator = haptics.create(id)?.takeRetainedValue(),
+              haptics.open(actuator) == 0 else { return }
+        actuators[UInt(bitPattern: device)] = actuator
+    }
+
+    /// Fires one click on the given surface. Pattern 6 is the firmest of the
+    /// short clicks; lower numbers are progressively lighter.
+    func click(device: UInt, pattern: Int32 = 6) {
+        guard let haptics, let actuator = actuators[device] else { return }
+        _ = haptics.actuate(actuator, pattern, 0, 0, 0)
+    }
+
     func stop() {
+        if let haptics {
+            for actuator in actuators.values { _ = haptics.close(actuator) }
+        }
+        actuators = [:]
         eachDevice { device in
             unregister(device, Self.callback)
             stopDevice(device)
